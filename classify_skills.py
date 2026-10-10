@@ -22,6 +22,11 @@ Examples:
     # Use a friend's self-hosted Qwen server instead of OpenRouter
     python classify_skills.py X4hTWCLinR4Gs8QLicVw --provider mgb
 
+    # Read all options from a manifest file; options on the command line override it
+    python classify_skills.py --manifest run-manifests/amc8-25-mgb.json
+    #   {"problems": "sample-problem-manifests/amc8-25questions.txt",
+    #    "input": ["output/amc-8-2011-2025.json"], "provider": "mgb", "combined": "output/skills/amc8-25-mgb.json"}
+
     # Show the prompt without calling the API
     python classify_skills.py X4hTWCLinR4Gs8QLicVw --dry-run
 """
@@ -299,6 +304,30 @@ def print_result(rec):
         print(f"                {s.get('why')}")
 
 
+def manifest_argv(path, parser):
+    """Turn a manifest into command-line arguments, so argparse checks its values like any others.
+
+    Keys are option names without the leading dashes ("reasoning-effort" or "reasoning_effort").
+    "problems" is a list of problem IDs, or the path of a file with one ID per line."""
+    manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+    options = {a.dest for a in parser._actions if a.option_strings} - {"help", "manifest"}
+    argv = []
+    problems = manifest.pop("problems", [])
+    argv += ["@" + problems] if isinstance(problems, str) else [str(p) for p in problems]
+    for key, value in manifest.items():
+        dest = key.replace("-", "_")
+        if dest not in options:
+            parser.error(f"{path}: unknown option {key!r}")
+        flag = "--" + dest.replace("_", "-")
+        if isinstance(value, bool):
+            argv += [flag] if value else []
+        elif isinstance(value, list):
+            argv += [flag, *map(str, value)]
+        elif value is not None:
+            argv += [flag, str(value)]
+    return argv
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
                                  fromfile_prefix_chars="@")
@@ -318,7 +347,13 @@ def main():
     ap.add_argument("--force", action="store_true",
                     help="call the API even if a saved result with the same prompt exists")
     ap.add_argument("--dry-run", action="store_true", help="print the prompt without calling the API")
+    ap.add_argument("--manifest", metavar="PATH",
+                    help="JSON file of options to use; options given on the command line take precedence")
     args = ap.parse_args()
+    if args.manifest:
+        manifest_args = ap.parse_args(manifest_argv(args.manifest, ap))
+        ap.set_defaults(**{k: v for k, v in vars(manifest_args).items() if v != ap.get_default(k)})
+        args = ap.parse_args()
     provider = PROVIDERS[args.provider]
     args.model = args.model or provider["default_model"]
     # The Windows console defaults to cp1252, which can't print characters like the square root sign.
