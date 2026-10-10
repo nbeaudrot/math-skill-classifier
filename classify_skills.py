@@ -19,6 +19,9 @@ Examples:
     # Classify the problems listed in a file (one ID per line)
     python classify_skills.py @eval-amc8-25.txt --model google/gemini-3.8-flash
 
+    # Use a friend's self-hosted Qwen server instead of OpenRouter
+    python classify_skills.py X4hTWCLinR4Gs8QLicVw --provider mgb
+
     # Show the prompt without calling the API
     python classify_skills.py X4hTWCLinR4Gs8QLicVw --dry-run
 """
@@ -40,7 +43,15 @@ DEFAULT_MODEL = "qwen/qwen3.8-27b"
 # maximum (65k+), which a low-balance key can't cover. This includes reasoning tokens.
 MAX_TOKENS = 16000
 KEY_FILE = Path(__file__).parent / "local-only" / "openrouter_api_key.txt"
-SKILLS_FILE = Path(__file__).parent / "skills-merged.csv"
+SKILLS_FILE = Path(__file__).parent / "skill-lists" / "skills-merged.csv"
+
+# OpenAI-compatible endpoints. A single self-hosted GPU is much slower than OpenRouter, hence the longer timeout.
+PROVIDERS = {
+    "openrouter": {"url": API_URL, "key_file": KEY_FILE, "default_model": DEFAULT_MODEL, "timeout": 180},
+    "mgb": {"url": "https://bifrost.mgb.monster/v1/chat/completions",
+            "key_file": Path(__file__).parent / "local-only" / "mgb_qweb_api_key.txt",
+            "default_model": "black4/unsloth/Qwen3.8-27B-GGUF:Q4_K_M", "timeout": 900},
+}
 
 CATEGORIES = ["arithmetic-and-statistics", "number theory", "algebra", "logic-and-geometry", "counting-and-probability"]
 SKILL_CATEGORIES = CATEGORIES + ["test-taking"]
@@ -157,7 +168,7 @@ def build_user_prompt(problem):
     return "\n".join(lines)
 
 
-def call_llm(model, messages, api_key, reasoning_effort=None):
+def call_llm(model, messages, api_key, reasoning_effort=None, provider="openrouter"):
     body = {
         "model": model,
         "messages": messages,
@@ -166,8 +177,13 @@ def call_llm(model, messages, api_key, reasoning_effort=None):
         "response_format": {"type": "json_object"},
     }
     if reasoning_effort:
-        body["reasoning"] = {"effort": reasoning_effort}
-    return post_openrouter(body, api_key)
+        # OpenRouter's own field; other OpenAI-compatible servers use OpenAI's top-level field.
+        if provider == "openrouter":
+            body["reasoning"] = {"effort": reasoning_effort}
+        else:
+            body["reasoning_effort"] = reasoning_effort
+    p = PROVIDERS[provider]
+    return post_openrouter(body, api_key, timeout=p["timeout"], url=p["url"])
 
 
 def run_label(model, reasoning_effort=None):
@@ -184,8 +200,8 @@ def results_dir(out_dir, model, reasoning_effort=None):
     return Path(out_dir) / re.sub(r"[^A-Za-z0-9.@-]+", "_", run_label(model, reasoning_effort))
 
 
-def post_openrouter(body, api_key, retries=3, timeout=180):
-    req = urllib.request.Request(API_URL, data=json.dumps(body).encode(), headers={
+def post_openrouter(body, api_key, retries=3, timeout=180, url=API_URL):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     })
@@ -246,9 +262,9 @@ def match_skills(result):
     return result
 
 
-def classify(problem, model, api_key, reasoning_effort=None):
+def classify(problem, model, api_key, reasoning_effort=None, provider="openrouter"):
     messages = build_messages(problem)
-    resp = call_llm(model, messages, api_key, reasoning_effort)
+    resp = call_llm(model, messages, api_key, reasoning_effort, provider)
     choice = resp["choices"][0]
     reply = choice["message"].get("content") or ""
     try:
@@ -291,7 +307,9 @@ def main():
     ap.add_argument("--sample", type=int, help="also classify N random problems without diagrams")
     ap.add_argument("--seed", type=int, help="random seed for --sample")
     ap.add_argument("--input", nargs="+", help="problem JSON file(s) (default: output/*.json)")
-    ap.add_argument("--model", default=DEFAULT_MODEL, help=f"OpenRouter model ID (default {DEFAULT_MODEL})")
+    ap.add_argument("--provider", choices=sorted(PROVIDERS), default="openrouter",
+                    help="which API to call (default openrouter; mgb is a friend's self-hosted Qwen server)")
+    ap.add_argument("--model", help=f"model ID (default: the provider's default, {DEFAULT_MODEL} for openrouter)")
     ap.add_argument("--reasoning-effort", choices=["low", "medium", "high", "xhigh"],
                     help="ask the model to think before answering (default: the model's own default)")
     ap.add_argument("--out-dir", default="output/skills", help="where to save results (default output/skills)")
@@ -301,6 +319,8 @@ def main():
                     help="call the API even if a saved result with the same prompt exists")
     ap.add_argument("--dry-run", action="store_true", help="print the prompt without calling the API")
     args = ap.parse_args()
+    provider = PROVIDERS[args.provider]
+    args.model = args.model or provider["default_model"]
     # The Windows console defaults to cp1252, which can't print characters like the square root sign.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -311,7 +331,7 @@ def main():
         ids += random.Random(args.seed).sample(pool, min(args.sample, len(pool)))
     if not ids:
         ap.error("give at least one PROBLEM_ID or use --sample")
-    api_key = None if args.dry_run else KEY_FILE.read_text(encoding="utf-8").strip()
+    api_key = None if args.dry_run else provider["key_file"].read_text(encoding="utf-8").strip()
     out_dir = results_dir(args.out_dir, args.model, args.reasoning_effort)
     combined = []
 
@@ -335,7 +355,7 @@ def main():
             match_skills(rec["result"])
             print(f"\n(using saved result {out_path})", file=sys.stderr)
         else:
-            rec = classify(problem, args.model, api_key, args.reasoning_effort)
+            rec = classify(problem, args.model, api_key, args.reasoning_effort, args.provider)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(rec, indent=2, ensure_ascii=False), encoding="utf-8")
         print_result(rec)
