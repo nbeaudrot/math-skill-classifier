@@ -16,16 +16,26 @@ import re
 import sys
 from pathlib import Path
 
-from classify_skills import (answer_choices, build_messages, has_diagram, load_problems, match_skills,
-                             parse_run_label, reparse_saved, results_dir)
+from classify_skills import (ANSWER_KEY_RUN_SUFFIX, answer_choices, answer_key_entry, build_messages,
+                             has_diagram, load_answer_key, load_problems, match_skills, parse_run_label,
+                             reparse_saved, results_dir)
 
 
-def skills_for(problem, label, out_dir):
-    path = results_dir(out_dir, *parse_run_label(label)) / f"{problem['id']}.json"
+def parse_model_label(label):
+    """Split a comparison label into (base model label, use answer key in prompt)."""
+    if label.endswith(ANSWER_KEY_RUN_SUFFIX):
+        return label[: -len(ANSWER_KEY_RUN_SUFFIX)], True
+    return label, False
+
+
+def skills_for(problem, label, out_dir, answer_keys=None):
+    base_label, with_key = parse_model_label(label)
+    path = results_dir(out_dir, *parse_run_label(base_label), with_key) / f"{problem['id']}.json"
     if not path.exists():
         return "no saved result"
     rec = json.loads(path.read_text(encoding="utf-8"))
-    if rec.get("prompt") != build_messages(problem):
+    key_entry = answer_key_entry(answer_keys, problem) if with_key else None
+    if rec.get("prompt") != build_messages(problem, key_entry):
         print(f"warning: {path} was made with a different prompt or skill list", file=sys.stderr)
     if reparse_saved(rec)["result"] is None:
         return "could not parse reply"
@@ -56,9 +66,12 @@ def main():
                     help="model IDs, optionally with a reasoning effort, e.g. google/gemini-3.8-flash@medium")
     ap.add_argument("--input", nargs="+", help="problem JSON file(s) (default: output/*.json)")
     ap.add_argument("--results-dir", default="output/skills", help="where classify_skills.py saved results")
+    ap.add_argument("--answer-key", metavar="PATH",
+                    help="needed to validate prompts for model labels ending in -with-key")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
+    answer_keys = load_answer_key(args.answer_key) if args.answer_key else None
     problems = load_problems(args.input or sorted(Path("output").glob("*.json")))
     ids = list(args.problem_ids)
     if args.sample:
@@ -73,7 +86,7 @@ def main():
             "knownAs": p.get("knownAs"),
             "statement": p["details"]["statement"],
             "answerChoices": answer_choices(p),
-            "models": {m: skills_for(p, m, args.results_dir) for m in args.models},
+            "models": {m: skills_for(p, m, args.results_dir, answer_keys) for m in args.models},
         })
 
     out = Path(args.out)
