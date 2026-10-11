@@ -87,11 +87,12 @@ def load_answer_keys(paths):
     return keys
 
 
-def build_messages(problem, key_entry=None):
-    user = problem.build_user_prompt()
-    if key_entry:
-        choice = key_entry.get("correctChoice")
-        answer = f"({choice}) {key_entry['answerText']}" if choice else key_entry["answerText"]
+def build_messages(problem):
+    user = problem.build_user_prompt(include_answer=False)
+    if problem.answer_choice or problem.answer_text:
+        choice = problem.answer_choice
+        text = problem.answer_text
+        answer = f"({choice}) {text}" if choice and text else (choice or text)
         user += (f"\n\nCorrect answer (from the official answer key): {answer}\n"
                  "Use it to check your work, but write the solution as if you worked it out "
                  "yourself, without mentioning that you were given the answer.")
@@ -119,8 +120,8 @@ def parse_answer(text):
     return m.group(1) if m else matches[-1].strip("*").strip()
 
 
-def solve(problem, provider, model, api_key, reasoning_effort=None, key_entry=None):
-    messages = build_messages(problem, key_entry)
+def solve(problem, provider, model, api_key, reasoning_effort=None):
+    messages = build_messages(problem)
     body = {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": MAX_TOKENS}
     if reasoning_effort:
         if provider == "openrouter":
@@ -139,7 +140,7 @@ def solve(problem, provider, model, api_key, reasoning_effort=None, key_entry=No
         "model": model,
         "reasoningEffort": reasoning_effort,
         "answer": parse_answer(solution),
-        "correctChoice": key_entry.get("correctChoice") if key_entry else None,
+        "correctChoice": problem.answer_choice,
         "solution": solution,
         "finishReason": choice.get("finish_reason"),
         "usage": resp.get("usage"),
@@ -207,20 +208,21 @@ def main():
         if problem.has_diagram():
             print(f"{pid}: skipped (has a diagram)", file=sys.stderr)
             continue
+        run_problem = problem.with_answer_key(answer_keys.get(pid))
         if args.dry_run:
-            system, user = (m["content"] for m in build_messages(problem, answer_keys.get(pid)))
+            system, user = (m["content"] for m in build_messages(run_problem))
             print(f"\n=== {pid} ===\n--- system ---\n{system}\n--- user ---\n{user}")
             continue
         out_path = out_dir / f"{pid}.json"
         saved = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
-        if (saved and saved.get("prompt") == build_messages(problem, answer_keys.get(pid))
+        if (saved and saved.get("prompt") == build_messages(run_problem)
                 and saved.get("reasoningEffort") == args.reasoning_effort and not args.force
                 and saved.get("solution")):
             rec = saved
             print(f"\n(using saved solution {out_path})", file=sys.stderr)
         else:
             print(f"\nSolving {problem.known_as} ({pid})...", file=sys.stderr, flush=True)
-            rec = solve(problem, args.provider, args.model, api_key, args.reasoning_effort, answer_keys.get(pid))
+            rec = solve(run_problem, args.provider, args.model, api_key, args.reasoning_effort)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(rec, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"\n=== {rec['knownAs']} ({pid}) ===\n{rec['solution']}")

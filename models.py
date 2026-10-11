@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +93,8 @@ class Problem:
     exam_type: str | None = None
     label: str | None = None
     has_diagram_refs: bool = False
+    answer_text: str | None = None
+    answer_choice: str | None = None
 
     @property
     def image_url(self) -> str | None:
@@ -129,7 +131,27 @@ class Problem:
                 break
         return ordered
 
-    def build_user_prompt(self, answer_entry: dict[str, Any] | None = None) -> str:
+    def apply_answer_key(self, entry: dict[str, Any] | None) -> None:
+        """Set answer_text and/or answer_choice from an AoPS-style answer-key entry."""
+        if not entry:
+            return
+        if entry.get("correctChoice"):
+            self.answer_choice = str(entry["correctChoice"])
+        if entry.get("answerText"):
+            self.answer_text = str(entry["answerText"])
+
+    def with_answer_key(self, entry: dict[str, Any] | None) -> Problem:
+        """Return a copy with answer fields filled from an answer-key entry."""
+        if not entry:
+            return self
+        kwargs: dict[str, Any] = {}
+        if entry.get("correctChoice"):
+            kwargs["answer_choice"] = str(entry["correctChoice"])
+        if entry.get("answerText"):
+            kwargs["answer_text"] = str(entry["answerText"])
+        return replace(self, **kwargs) if kwargs else self
+
+    def build_user_prompt(self, *, include_answer: bool = True) -> str:
         lines = [f"Source: {self.known_as or self.exam_title}"]
         if self.exam_type:
             lines.append(f"Competition level: {self.exam_type}")
@@ -138,12 +160,12 @@ class Problem:
         if choices:
             lines += ["", "Answer choices:"]
             lines += [f"({k}) {v}" for k, v in choices.items()]
-        if answer_entry:
+        if include_answer and (self.answer_choice or self.answer_text):
             lines += ["", "Known correct answer (from the official answer key):"]
-            if answer_entry.get("correctChoice"):
-                lines.append(f"Choice: ({answer_entry['correctChoice']})")
-            if answer_entry.get("answerText"):
-                lines.append(f"Answer: {answer_entry['answerText']}")
+            if self.answer_choice:
+                lines.append(f"Choice: ({self.answer_choice})")
+            if self.answer_text:
+                lines.append(f"Answer: {self.answer_text}")
         return "\n".join(lines)
 
     @classmethod
@@ -185,6 +207,10 @@ class Problem:
             out["exam_type"] = self.exam_type
         if self.label is not None:
             out["label"] = self.label
+        if self.answer_text is not None:
+            out["answer_text"] = self.answer_text
+        if self.answer_choice is not None:
+            out["answer_choice"] = self.answer_choice
         return out
 
     def to_json(self, *, indent: int | None = None, **kwargs) -> str:
@@ -216,7 +242,7 @@ def has_diagram_in_record(problem: dict[str, Any]) -> bool:
     return any(part.get("kind") == "image" for part in d.get("statementParts") or [])
 
 
-def load_problems(paths) -> dict[str, Problem]:
+def load_problems(paths, answer_keys: dict[str, Any] | None = None) -> dict[str, Problem]:
     import json
     from pathlib import Path
 
@@ -227,6 +253,8 @@ def load_problems(paths) -> dict[str, Problem]:
             exam_type = rec["exam"].get("examType")
             for p in rec["problems"]:
                 prob = Problem.from_record(p, exam_title=exam_title, exam_type=exam_type)
+                if answer_keys:
+                    prob.apply_answer_key(answer_keys.get(prob.id))
                 problems[prob.id] = prob
     return problems
 

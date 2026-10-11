@@ -304,8 +304,8 @@ def reparse_saved(rec):
     return rec
 
 
-def build_user_content(problem: Problem, answer_entry=None, images_dir=None):
-    text = problem.build_user_prompt(answer_entry)
+def build_user_content(problem: Problem, images_dir=None):
+    text = problem.build_user_prompt()
     paths = problem.local_image_paths(images_dir)
     if not paths:
         return text
@@ -316,11 +316,11 @@ def build_user_content(problem: Problem, answer_entry=None, images_dir=None):
     return blocks
 
 
-def build_messages(problem: Problem, answer_entry=None, images_dir=None):
-    include_key = answer_entry is not None
+def build_messages(problem: Problem, images_dir=None):
+    include_key = bool(problem.answer_choice or problem.answer_text)
     paths = problem.local_image_paths(images_dir)
     include_images = bool(paths)
-    user = build_user_content(problem, answer_entry, images_dir)
+    user = build_user_content(problem, images_dir)
     return [{"role": "system", "content": system_prompt(include_key, include_images)},
             {"role": "user", "content": user}]
 
@@ -341,8 +341,8 @@ def match_skills(result):
 
 
 def classify(problem: Problem, model, api_key, reasoning_effort=None, provider="openrouter",
-             answer_entry=None, images_dir=None):
-    messages = build_messages(problem, answer_entry, images_dir)
+             images_dir=None):
+    messages = build_messages(problem, images_dir)
     resp = call_llm(model, messages, api_key, reasoning_effort, provider)
     choice = resp["choices"][0]
     reply = choice["message"].get("content") or ""
@@ -469,10 +469,10 @@ def main():
         if args.skip_diagrams_without_images and problem.has_diagram() and not problem.local_image_paths(images_dir):
             print(f"{pid}: skipped (diagram but no local images; run fetch_problem_images.py)", file=sys.stderr)
             continue
-        key_entry = answer_keys.get(problem.id) if answer_keys else None
-        if answer_keys and key_entry is None:
+        run_problem = problem.with_answer_key(answer_keys.get(problem.id)) if answer_keys else problem
+        if answer_keys and answer_keys.get(problem.id) is None:
             print(f"{pid}: warning: no answer key entry", file=sys.stderr)
-        messages = build_messages(problem, key_entry, images_dir)
+        messages = build_messages(run_problem, images_dir)
         if args.dry_run:
             user = messages[1]["content"]
             if isinstance(user, list):
@@ -501,8 +501,8 @@ def main():
             match_skills(rec["result"])
             print(f"\n(using saved result {out_path})", file=sys.stderr)
         else:
-            rec = classify(problem, args.model, api_key, args.reasoning_effort, args.provider,
-                           key_entry, images_dir)
+            rec = classify(run_problem, args.model, api_key, args.reasoning_effort, args.provider,
+                           images_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(rec, indent=2, ensure_ascii=False), encoding="utf-8")
         if rec["result"] is not None:

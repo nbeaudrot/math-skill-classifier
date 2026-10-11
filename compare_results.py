@@ -34,8 +34,8 @@ def skills_for(problem, label, out_dir, answer_keys=None):
     if not path.exists():
         return "no saved result"
     rec = json.loads(path.read_text(encoding="utf-8"))
-    key_entry = answer_keys.get(problem.id) if with_key and answer_keys else None
-    if rec.get("prompt") != build_messages(problem, key_entry):
+    probe = problem.with_answer_key(answer_keys.get(problem.id)) if with_key and answer_keys else problem
+    if rec.get("prompt") != build_messages(probe):
         print(f"warning: {path} was made with a different prompt or skill list", file=sys.stderr)
     if reparse_saved(rec)["result"] is None:
         return "could not parse reply"
