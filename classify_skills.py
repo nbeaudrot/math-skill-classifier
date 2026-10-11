@@ -31,7 +31,7 @@ Examples:
     python classify_skills.py X4hTWCLinR4Gs8QLicVw --dry-run
 
     # Include the official answer to consider alternate solution paths
-    python classify_skills.py @sample-problem-lists/amc8-2022-no-diagram.txt --input output/amc8-2022.json --answer-key
+    python classify_skills.py @sample-problem-lists/amc8-2022.txt --input output/amc8-2022.json --answer-key
 
     # Attach diagrams downloaded from VentiMath (see fetch_problem_images.py)
     python fetch_problem_images.py output/amc8-2022.json
@@ -106,10 +106,15 @@ You are an experienced math competition coach. Given a competition problem, iden
 mathematical skills a student needs to solve it.
 
 Guidelines:
-- Choose skills from the skill list below, using each skill name exactly as written.
-- Only if a reasonable solution needs a skill that nothing on the list covers, add a new \
-skill with "new": true and a category from: {skill_category_list}. This should be rare.
+- Choose skills from the skill list below. Each list entry is written as NAME: description; \
+in JSON put only NAME in the "skill" field (never the description). Use the name exactly as \
+written, including capitalization and punctuation.
+- Also choose the single overall category that best describes the problem as a whole, \
+based on its main mathematical content.
+- Do not solve the problem in detail; a one-sentence justification per skill is enough.
 - Include only skills actually used in a reasonable solution. Usually 2-6 skills.
+- Sometimes, a reasonable solution will use a skill that nothing on the list covers. When this happens, add a new \
+skill with "new": true and a category from: {skill_category_list}. 
 - Judge skills relative to the competition level given with the problem. Basic skills \
 (fractions, percents, unit conversions, mental math) are often taken for granted \
 in advanced competitions, but list them when the problem genuinely exercises them, \
@@ -129,9 +134,8 @@ skills on the list. Include them only when the choices actually make them useful
 particular, list "Eliminating answer choices" only when ruling out choices clearly saves \
 work compared with solving the problem directly, not when the problem has to be solved \
 anyway and the matching choice is then picked.
-- Do not solve the problem in detail; a one-sentence justification per skill is enough.
-- Also choose the single overall category that best describes the problem as a whole, \
-based on its main mathematical content.
+
+
 
 Skill list, grouped by category:
 
@@ -143,12 +147,13 @@ Respond with JSON only, in this format:
   "overall_category": "<one of: {category_list}>",
   "skills": [
     {{
-      "skill": "<skill name from the list>",
+      "skill": "Fractions",
       "importance": "essential" | "time-saving" | "helpful",
       "why": "<one sentence on how the skill is used in this problem>"
     }}
   ]
 }}
+Wrong: "skill": "Fractions: Adding, multiplying, ..." (do not copy the description from the list).
 For a new skill not on the list, also include "new": true and "category"."""
 
 IMAGE_GUIDANCE = """\
@@ -162,9 +167,8 @@ Additional guidelines (the correct answer is given below):
 - Use the known answer to sanity-check which skills fit a complete solution, but do not \
 reverse-engineer a full solution in the response.
 - Consider alternate reasonable solution paths, including clever formulas or problem-solving \
-strategies common on math team and competition curricula (e.g. telescoping, complementary \
-counting, Simon's Favorite Factoring Trick, divisibility shortcuts), and tag skills for any \
-path that a strong student might actually use.
+strategies common on math team and competition curricula, \
+and tag skills for any path that a strong student might actually use.
 - If the answer makes a shortcut or test-taking approach clearly viable, include those skills \
 when appropriate."""
 
