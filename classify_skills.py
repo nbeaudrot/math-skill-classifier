@@ -24,7 +24,7 @@ Examples:
 
     # Read all options from a manifest file; options on the command line override it
     python classify_skills.py --manifest run-manifests/amc8-25-mgb.json
-    #   {"problems": "sample-problem-manifests/amc8-25questions.txt",
+    #   {"problems": "sample-problem-lists/amc8-25questions.txt",
     #    "input": ["output/amc-8-2011-2025.json"], "provider": "mgb", "combined": "output/skills/amc8-25-mgb.json"}
 
     # Show the prompt without calling the API
