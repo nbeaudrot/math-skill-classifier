@@ -1,7 +1,7 @@
 """Ask an LLM which mathematical skills are needed to solve a problem.
 
 Problems are looked up by ID in the JSON files written by fetch_problems.py.
-Problems with diagrams (images in the statement or the answer choices) are skipped.
+When diagram images are available (see fetch_problem_images.py), they are attached to the prompt.
 
 Examples:
     # Classify one problem
@@ -32,11 +32,17 @@ Examples:
 
     # Include the official answer to consider alternate solution paths
     python classify_skills.py @sample-problem-lists/amc8-2022-no-diagram.txt --input output/amc8-2022.json --answer-key
+
+    # Attach diagrams downloaded from VentiMath (see fetch_problem_images.py)
+    python fetch_problem_images.py output/amc8-2022.json
+    python classify_skills.py nBHNiRFOP0h4LI6KDCfF --input output/amc8-2022.json --dry-run
 """
 
 import argparse
+import base64
 import csv
 import json
+import mimetypes
 import random
 import re
 import sys
@@ -143,6 +149,12 @@ Respond with JSON only, in this format:
 }}
 For a new skill not on the list, also include "new": true and "category"."""
 
+IMAGE_GUIDANCE = """\
+Diagram images may be attached to the problem. Examining them may help you understand the \
+problem and classify skills accurately, but sometimes an image is only an illustration to help \
+students visualize the setting and is not required to solve the problem. Use the images when \
+they carry mathematical information relevant to a reasonable solution."""
+
 ANSWER_KEY_GUIDANCE = """\
 Additional guidelines (the correct answer is given below):
 - Use the known answer to sanity-check which skills fit a complete solution, but do not \
@@ -170,6 +182,49 @@ def has_diagram(problem):
     if d.get("image") or d.get("optionImages"):
         return True
     return any(part.get("kind") == "image" for part in d.get("statementParts") or [])
+
+
+def default_images_dir(input_paths):
+    """output/images/<basename> when classifying from a single fetch_problems JSON file."""
+    if not input_paths or len(input_paths) != 1:
+        return None
+    path = Path(input_paths[0])
+    candidate = Path("output/images") / path.stem
+    return candidate if candidate.is_dir() else None
+
+
+def local_image_paths(problem, images_dir):
+    """Paths to downloaded images for this problem, in prompt order (statement, then A–E)."""
+    if not images_dir:
+        return []
+    root = Path(images_dir) / problem["id"]
+    if not root.is_dir():
+        return []
+    ordered = []
+    for stem in ("statement",):
+        for path in sorted(root.glob(f"{stem}.*")):
+            ordered.append(path)
+            break
+    for letter in "ABCDE":
+        for path in sorted(root.glob(f"option-{letter}.*")):
+            ordered.append(path)
+            break
+    return ordered
+
+
+def file_to_data_url(path):
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    b64 = base64.standard_b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def image_caption(path):
+    name = path.stem
+    if name == "statement":
+        return "Problem diagram:"
+    if name.startswith("option-"):
+        return f"Answer choice ({name.rpartition('-')[2]}) diagram:"
+    return f"Diagram ({name}):"
 
 
 def answer_choices(problem):
@@ -207,10 +262,13 @@ def build_user_prompt(problem, answer_entry=None):
     return "\n".join(lines)
 
 
-def system_prompt(include_answer_key=False):
-    if not include_answer_key:
-        return LLM_PROMPT
-    return LLM_PROMPT + "\n\n" + ANSWER_KEY_GUIDANCE
+def system_prompt(include_answer_key=False, include_images=False):
+    text = LLM_PROMPT
+    if include_images:
+        text += "\n\n" + IMAGE_GUIDANCE
+    if include_answer_key:
+        text += "\n\n" + ANSWER_KEY_GUIDANCE
+    return text
 
 
 def call_llm(model, messages, api_key, reasoning_effort=None, provider="openrouter"):
@@ -306,10 +364,25 @@ def reparse_saved(rec):
     return rec
 
 
-def build_messages(problem, answer_entry=None):
+def build_user_content(problem, answer_entry=None, images_dir=None):
+    text = build_user_prompt(problem, answer_entry)
+    paths = local_image_paths(problem, images_dir)
+    if not paths:
+        return text
+    blocks = [{"type": "text", "text": text}]
+    for path in paths:
+        blocks.append({"type": "text", "text": image_caption(path)})
+        blocks.append({"type": "image_url", "image_url": {"url": file_to_data_url(path)}})
+    return blocks
+
+
+def build_messages(problem, answer_entry=None, images_dir=None):
     include_key = answer_entry is not None
-    return [{"role": "system", "content": system_prompt(include_key)},
-            {"role": "user", "content": build_user_prompt(problem, answer_entry)}]
+    paths = local_image_paths(problem, images_dir)
+    include_images = bool(paths)
+    user = build_user_content(problem, answer_entry, images_dir)
+    return [{"role": "system", "content": system_prompt(include_key, include_images)},
+            {"role": "user", "content": user}]
 
 
 IMPORTANCE_ORDER = {"essential": 0, "time-saving": 1, "helpful": 2}
@@ -317,7 +390,8 @@ IMPORTANCE_ORDER = {"essential": 0, "time-saving": 1, "helpful": 2}
 
 def match_skills(result):
     """Use the skill list's exact name and category, mark anything not on the list as unlisted,
-    and order skills essential first (keeping the model's order within each group)."""
+    set new: true when the model omitted it, and order skills essential first (keeping the
+    model's order within each group)."""
     result["skills"] = sorted(result.get("skills", []),
                               key=lambda s: IMPORTANCE_ORDER.get(str(s.get("importance")).lower(), 3))
     for s in result["skills"]:
@@ -327,11 +401,14 @@ def match_skills(result):
             s.pop("new", None)
         else:
             s["listed"] = False
+            if "new" not in s:
+                s["new"] = True
     return result
 
 
-def classify(problem, model, api_key, reasoning_effort=None, provider="openrouter", answer_entry=None):
-    messages = build_messages(problem, answer_entry)
+def classify(problem, model, api_key, reasoning_effort=None, provider="openrouter",
+             answer_entry=None, images_dir=None):
+    messages = build_messages(problem, answer_entry, images_dir)
     resp = call_llm(model, messages, api_key, reasoning_effort, provider)
     choice = resp["choices"][0]
     reply = choice["message"].get("content") or ""
@@ -399,6 +476,11 @@ def main():
     ap.add_argument("--sample", type=int, help="also classify N random problems without diagrams")
     ap.add_argument("--seed", type=int, help="random seed for --sample")
     ap.add_argument("--input", nargs="+", help="problem JSON file(s) (default: output/*.json)")
+    ap.add_argument("--images-dir", metavar="PATH",
+                    help="folder of images from fetch_problem_images.py "
+                         "(default: output/images/<basename> when --input is one file)")
+    ap.add_argument("--skip-diagrams-without-images", action="store_true",
+                    help="skip problems that have VentiMath images but none on disk in --images-dir")
     ap.add_argument("--provider", choices=sorted(PROVIDERS), default="openrouter",
                     help="which API to call (default openrouter; mgb is a friend's self-hosted Qwen server)")
     ap.add_argument("--model", help="model ID (default: provider default); "
@@ -429,10 +511,12 @@ def main():
     # The Windows console defaults to cp1252, which can't print characters like the square root sign.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    problems = load_problems(args.input or sorted(Path("output").glob("*.json")))
+    input_paths = args.input or [str(p) for p in sorted(Path("output").glob("*.json"))]
+    problems = load_problems(input_paths)
+    images_dir = args.images_dir or default_images_dir(input_paths)
     ids = list(args.problem_ids)
     if args.sample:
-        pool = sorted(pid for pid, p in problems.items() if not has_diagram(p) and pid not in ids)
+        pool = sorted(pid for pid in problems if pid not in ids)
         ids += random.Random(args.seed).sample(pool, min(args.sample, len(pool)))
     if not ids:
         ap.error("give at least one PROBLEM_ID or use --sample")
@@ -446,15 +530,30 @@ def main():
         if problem is None:
             print(f"{pid}: not found in input files", file=sys.stderr)
             continue
-        if has_diagram(problem):
-            print(f"{pid}: skipped (has a diagram)", file=sys.stderr)
+        if args.skip_diagrams_without_images and has_diagram(problem) and not local_image_paths(problem, images_dir):
+            print(f"{pid}: skipped (diagram but no local images; run fetch_problem_images.py)", file=sys.stderr)
             continue
         key_entry = answer_key_entry(answer_keys, problem) if answer_keys else None
         if answer_keys and key_entry is None:
             print(f"{pid}: warning: no answer key entry", file=sys.stderr)
-        messages = build_messages(problem, key_entry)
+        messages = build_messages(problem, key_entry, images_dir)
         if args.dry_run:
-            print(f"\n=== {pid} ===\n--- system ---\n{messages[0]['content']}\n--- user ---\n{messages[1]['content']}")
+            user = messages[1]["content"]
+            if isinstance(user, list):
+                user_lines = []
+                for block in user:
+                    if block.get("type") == "text":
+                        user_lines.append(block["text"])
+                    elif block.get("type") == "image_url":
+                        url = block["image_url"]["url"]
+                        user_lines.append(f"[image: {len(url)} chars data URL]")
+                user_display = "\n".join(user_lines)
+            else:
+                user_display = user
+            img_note = ""
+            if local_image_paths(problem, images_dir):
+                img_note = f" ({len(local_image_paths(problem, images_dir))} image(s) from {images_dir})"
+            print(f"\n=== {pid}{img_note} ===\n--- system ---\n{messages[0]['content']}\n--- user ---\n{user_display}")
             continue
         out_path = out_dir / f"{pid}.json"
         saved = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
@@ -465,7 +564,8 @@ def main():
             match_skills(rec["result"])
             print(f"\n(using saved result {out_path})", file=sys.stderr)
         else:
-            rec = classify(problem, args.model, api_key, args.reasoning_effort, args.provider, key_entry)
+            rec = classify(problem, args.model, api_key, args.reasoning_effort, args.provider,
+                           key_entry, images_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(rec, indent=2, ensure_ascii=False), encoding="utf-8")
         print_result(rec)
