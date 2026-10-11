@@ -51,6 +51,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from models import Problem, Skill, load_problems, match_skills as _match_skills
+
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-haiku-5.5@high"
 # OpenRouter reserves credit for max_tokens up front; without a cap it uses the model's
@@ -167,23 +169,6 @@ path that a strong student might actually use.
 when appropriate."""
 
 
-def load_problems(paths):
-    problems = {}
-    for path in paths:
-        for rec in json.loads(Path(path).read_text(encoding="utf-8")):
-            for p in rec["problems"]:
-                problems[p["id"]] = {**p, "examTitle": rec["title"],
-                                     "examType": rec["exam"].get("examType")}
-    return problems
-
-
-def has_diagram(problem):
-    d = problem.get("details", {})
-    if d.get("image") or d.get("optionImages"):
-        return True
-    return any(part.get("kind") == "image" for part in d.get("statementParts") or [])
-
-
 def default_images_dir(input_paths):
     """output/images/<basename> when classifying from a single fetch_problems JSON file."""
     if not input_paths or len(input_paths) != 1:
@@ -191,25 +176,6 @@ def default_images_dir(input_paths):
     path = Path(input_paths[0])
     candidate = Path("output/images") / path.stem
     return candidate if candidate.is_dir() else None
-
-
-def local_image_paths(problem, images_dir):
-    """Paths to downloaded images for this problem, in prompt order (statement, then A–E)."""
-    if not images_dir:
-        return []
-    root = Path(images_dir) / problem["id"]
-    if not root.is_dir():
-        return []
-    ordered = []
-    for stem in ("statement",):
-        for path in sorted(root.glob(f"{stem}.*")):
-            ordered.append(path)
-            break
-    for letter in "ABCDE":
-        for path in sorted(root.glob(f"option-{letter}.*")):
-            ordered.append(path)
-            break
-    return ordered
 
 
 def file_to_data_url(path):
@@ -227,39 +193,13 @@ def image_caption(path):
     return f"Diagram ({name}):"
 
 
-def answer_choices(problem):
-    opts = problem["details"].get("options") or {}
-    return {k: f"${opts[k]}$" for k in sorted(opts)}
+
 
 
 def load_answer_key(path):
     """Map problem ID -> {correctChoice, answerText, ...} from an AoPS-style answer key JSON file."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     return data.get("problems") or {}
-
-
-def answer_key_entry(answer_keys, problem):
-    if not answer_keys:
-        return None
-    return answer_keys.get(problem["id"])
-
-
-def build_user_prompt(problem, answer_entry=None):
-    lines = [f"Source: {problem.get('knownAs') or problem['examTitle']}"]
-    if problem.get("examType"):
-        lines.append(f"Competition level: {problem['examType']}")
-    lines += ["", "Problem:", problem["details"]["statement"].strip()]
-    choices = answer_choices(problem)
-    if choices:
-        lines += ["", "Answer choices:"]
-        lines += [f"({k}) {v}" for k, v in choices.items()]
-    if answer_entry:
-        lines += ["", "Known correct answer (from the official answer key):"]
-        if answer_entry.get("correctChoice"):
-            lines.append(f"Choice: ({answer_entry['correctChoice']})")
-        if answer_entry.get("answerText"):
-            lines.append(f"Answer: {answer_entry['answerText']}")
-    return "\n".join(lines)
 
 
 def system_prompt(include_answer_key=False, include_images=False):
@@ -364,9 +304,9 @@ def reparse_saved(rec):
     return rec
 
 
-def build_user_content(problem, answer_entry=None, images_dir=None):
-    text = build_user_prompt(problem, answer_entry)
-    paths = local_image_paths(problem, images_dir)
+def build_user_content(problem: Problem, answer_entry=None, images_dir=None):
+    text = problem.build_user_prompt(answer_entry)
+    paths = problem.local_image_paths(images_dir)
     if not paths:
         return text
     blocks = [{"type": "text", "text": text}]
@@ -376,37 +316,31 @@ def build_user_content(problem, answer_entry=None, images_dir=None):
     return blocks
 
 
-def build_messages(problem, answer_entry=None, images_dir=None):
+def build_messages(problem: Problem, answer_entry=None, images_dir=None):
     include_key = answer_entry is not None
-    paths = local_image_paths(problem, images_dir)
+    paths = problem.local_image_paths(images_dir)
     include_images = bool(paths)
     user = build_user_content(problem, answer_entry, images_dir)
     return [{"role": "system", "content": system_prompt(include_key, include_images)},
             {"role": "user", "content": user}]
 
 
-IMPORTANCE_ORDER = {"essential": 0, "time-saving": 1, "helpful": 2}
-
-
 def match_skills(result):
     """Use the skill list's exact name and category, mark anything not on the list as unlisted,
     set new: true when the model omitted it, and order skills essential first (keeping the
     model's order within each group)."""
-    result["skills"] = sorted(result.get("skills", []),
-                              key=lambda s: IMPORTANCE_ORDER.get(str(s.get("importance")).lower(), 3))
-    for s in result["skills"]:
-        known = SKILLS_BY_NAME.get(str(s.get("skill", "")).strip().lower())
-        if known:
-            s["skill"], s["category"], s["listed"] = known["skill"], known["category"], True
-            s.pop("new", None)
-        else:
-            s["listed"] = False
-            if "new" not in s:
-                s["new"] = True
-    return result
+    if result is None:
+        return None
+    matched = _match_skills(result, SKILLS_BY_NAME)
+    data = matched.to_dict()
+    if isinstance(result, dict):
+        result.clear()
+        result.update(data)
+        return result
+    return matched
 
 
-def classify(problem, model, api_key, reasoning_effort=None, provider="openrouter",
+def classify(problem: Problem, model, api_key, reasoning_effort=None, provider="openrouter",
              answer_entry=None, images_dir=None):
     messages = build_messages(problem, answer_entry, images_dir)
     resp = call_llm(model, messages, api_key, reasoning_effort, provider)
@@ -417,8 +351,8 @@ def classify(problem, model, api_key, reasoning_effort=None, provider="openroute
     except (json.JSONDecodeError, AttributeError):
         result = None
     return {
-        "problemId": problem["id"],
-        "knownAs": problem.get("knownAs"),
+        "problemId": problem.id,
+        "knownAs": problem.known_as,
         "model": model,
         "reasoningEffort": reasoning_effort,
         "result": result,
@@ -438,7 +372,9 @@ def print_result(rec):
         return
     print(res.get("summary", ""))
     print(f"Overall category: {res.get('overall_category')}")
-    for s in res.get("skills", []):
+    skills = res.get("skills", [])
+    for raw in skills:
+        s = raw if isinstance(raw, dict) else raw.to_dict()
         flag = "" if s.get("listed") else "  ** NOT ON SKILL LIST **"
         print(f"  [{s.get('importance', '?'):11}] {s.get('skill')}  ({s.get('category')}){flag}")
         print(f"                {s.get('why')}")
@@ -530,10 +466,10 @@ def main():
         if problem is None:
             print(f"{pid}: not found in input files", file=sys.stderr)
             continue
-        if args.skip_diagrams_without_images and has_diagram(problem) and not local_image_paths(problem, images_dir):
+        if args.skip_diagrams_without_images and problem.has_diagram() and not problem.local_image_paths(images_dir):
             print(f"{pid}: skipped (diagram but no local images; run fetch_problem_images.py)", file=sys.stderr)
             continue
-        key_entry = answer_key_entry(answer_keys, problem) if answer_keys else None
+        key_entry = answer_keys.get(problem.id) if answer_keys else None
         if answer_keys and key_entry is None:
             print(f"{pid}: warning: no answer key entry", file=sys.stderr)
         messages = build_messages(problem, key_entry, images_dir)
@@ -551,8 +487,9 @@ def main():
             else:
                 user_display = user
             img_note = ""
-            if local_image_paths(problem, images_dir):
-                img_note = f" ({len(local_image_paths(problem, images_dir))} image(s) from {images_dir})"
+            img_paths = problem.local_image_paths(images_dir)
+            if img_paths:
+                img_note = f" ({len(img_paths)} image(s) from {images_dir})"
             print(f"\n=== {pid}{img_note} ===\n--- system ---\n{messages[0]['content']}\n--- user ---\n{user_display}")
             continue
         out_path = out_dir / f"{pid}.json"
@@ -568,12 +505,14 @@ def main():
                            key_entry, images_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(rec, indent=2, ensure_ascii=False), encoding="utf-8")
+        if rec["result"] is not None:
+            problem.skills = [Skill.from_dict(s) for s in rec["result"].get("skills", [])]
         print_result(rec)
         combined.append({
             "problemId": pid,
-            "knownAs": problem.get("knownAs"),
-            "statement": problem["details"]["statement"],
-            "answerChoices": answer_choices(problem),
+            "knownAs": problem.known_as,
+            "statement": problem.statement,
+            "answerChoices": problem.prompt_answer_choices(),
             "llmResult": rec["result"] if rec["result"] is not None else rec["rawReply"],
         })
 

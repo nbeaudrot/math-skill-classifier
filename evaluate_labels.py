@@ -23,8 +23,8 @@ import re
 import sys
 from pathlib import Path
 
-from classify_skills import (ANSWER_KEY_RUN_SUFFIX, SKILLS_BY_NAME, answer_choices, has_diagram,
-                             load_answer_key, load_problems)
+from classify_skills import ANSWER_KEY_RUN_SUFFIX, SKILLS_BY_NAME, load_answer_key
+from models import load_problems
 from compare_results import dumps_with_one_line_arrays, skills_for
 
 LABELS_FILE = Path(__file__).parent / "local-only" / "Contest Math Question Categorization - Sheet1.csv"
@@ -178,7 +178,7 @@ def translate(category, sub):
 
 def load_labels(problems, path=LABELS_FILE):
     """Map problem ID -> list of (acceptable skills, readable label) for every spreadsheet row with a matching problem."""
-    by_exam = {(p.get("examType"), p["examTitle"][:4], str(p.get("label"))): pid for pid, p in problems.items()}
+    by_exam = {(p.exam_type, (p.exam_title or "")[:4], str(p.label)): pid for pid, p in problems.items()}
     labels, unmatched_rows = {}, 0
     with open(path, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
@@ -196,7 +196,7 @@ def load_labels(problems, path=LABELS_FILE):
 
 
 def pick(labels, problems, n, seed):
-    pool = sorted(pid for pid in labels if not has_diagram(problems[pid]))
+    pool = sorted(pid for pid in labels if not problems[pid].has_diagram())
     return random.Random(seed).sample(pool, min(n, len(pool))), len(pool)
 
 
@@ -292,9 +292,9 @@ def main():
             yours = [{"label": label, "skills": skills} for skills, label in labels[pid]]
             records.append({
                 "problemId": pid,
-                "knownAs": p.get("knownAs"),
-                "statement": p["details"]["statement"],
-                "answerChoices": answer_choices(p),
+                "knownAs": p.known_as,
+                "statement": p.statement,
+                "answerChoices": p.prompt_answer_choices(),
                 "models": {"your labels": yours,
                            **{m: skills_for(p, m, args.results_dir, answer_keys) for m in model_labels}},
             })

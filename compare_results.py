@@ -16,9 +16,9 @@ import re
 import sys
 from pathlib import Path
 
-from classify_skills import (ANSWER_KEY_RUN_SUFFIX, answer_choices, answer_key_entry, build_messages,
-                             has_diagram, load_answer_key, load_problems, match_skills, parse_run_label,
-                             reparse_saved, results_dir)
+from classify_skills import (ANSWER_KEY_RUN_SUFFIX, build_messages, load_answer_key, match_skills,
+                             parse_run_label, reparse_saved, results_dir)
+from models import load_problems
 
 
 def parse_model_label(label):
@@ -30,11 +30,11 @@ def parse_model_label(label):
 
 def skills_for(problem, label, out_dir, answer_keys=None):
     base_label, with_key = parse_model_label(label)
-    path = results_dir(out_dir, *parse_run_label(base_label), with_key) / f"{problem['id']}.json"
+    path = results_dir(out_dir, *parse_run_label(base_label), with_key) / f"{problem.id}.json"
     if not path.exists():
         return "no saved result"
     rec = json.loads(path.read_text(encoding="utf-8"))
-    key_entry = answer_key_entry(answer_keys, problem) if with_key else None
+    key_entry = answer_keys.get(problem.id) if with_key and answer_keys else None
     if rec.get("prompt") != build_messages(problem, key_entry):
         print(f"warning: {path} was made with a different prompt or skill list", file=sys.stderr)
     if reparse_saved(rec)["result"] is None:
@@ -75,7 +75,7 @@ def main():
     problems = load_problems(args.input or sorted(Path("output").glob("*.json")))
     ids = list(args.problem_ids)
     if args.sample:
-        pool = sorted(pid for pid, p in problems.items() if not has_diagram(p) and pid not in ids)
+        pool = sorted(pid for pid, p in problems.items() if not p.has_diagram() and pid not in ids)
         ids += random.Random(args.seed).sample(pool, min(args.sample, len(pool)))
 
     records = []
@@ -83,9 +83,9 @@ def main():
         p = problems[pid]
         records.append({
             "problemId": pid,
-            "knownAs": p.get("knownAs"),
-            "statement": p["details"]["statement"],
-            "answerChoices": answer_choices(p),
+            "knownAs": p.known_as,
+            "statement": p.statement,
+            "answerChoices": p.prompt_answer_choices(),
             "models": {m: skills_for(p, m, args.results_dir, answer_keys) for m in args.models},
         })
 

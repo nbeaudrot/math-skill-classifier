@@ -24,8 +24,8 @@ import re
 import sys
 from pathlib import Path
 
-from classify_skills import (MAX_TOKENS, PROVIDERS, answer_choices, build_user_prompt, has_diagram,
-                             load_problems, manifest_argv, post_openrouter, results_dir)
+from classify_skills import MAX_TOKENS, PROVIDERS, manifest_argv, post_openrouter, results_dir
+from models import load_problems
 
 DEFAULT_PROVIDER = "openrouter"
 DEFAULT_MODEL = "anthropic/claude-haiku-5.5"
@@ -88,7 +88,7 @@ def load_answer_keys(paths):
 
 
 def build_messages(problem, key_entry=None):
-    user = build_user_prompt(problem)
+    user = problem.build_user_prompt()
     if key_entry:
         choice = key_entry.get("correctChoice")
         answer = f"({choice}) {key_entry['answerText']}" if choice else key_entry["answerText"]
@@ -132,10 +132,10 @@ def solve(problem, provider, model, api_key, reasoning_effort=None, key_entry=No
     choice = resp["choices"][0]
     solution = message_text(choice["message"])
     return {
-        "problemId": problem["id"],
-        "knownAs": problem.get("knownAs"),
-        "statement": problem["details"]["statement"],
-        "answerChoices": answer_choices(problem),
+        "problemId": problem.id,
+        "knownAs": problem.known_as,
+        "statement": problem.statement,
+        "answerChoices": problem.prompt_answer_choices(),
         "model": model,
         "reasoningEffort": reasoning_effort,
         "answer": parse_answer(solution),
@@ -190,7 +190,7 @@ def main():
     problems = load_problems(args.input or sorted(Path("output").glob("*.json")))
     ids = list(args.problem_ids)
     if args.sample:
-        pool = sorted(pid for pid, p in problems.items() if not has_diagram(p) and pid not in ids)
+        pool = sorted(pid for pid, p in problems.items() if not p.has_diagram() and pid not in ids)
         ids += random.Random(args.seed).sample(pool, min(args.sample, len(pool)))
     if not ids:
         ap.error("give at least one PROBLEM_ID or use --sample")
@@ -204,7 +204,7 @@ def main():
         if problem is None:
             print(f"{pid}: not found in input files", file=sys.stderr)
             continue
-        if has_diagram(problem):
+        if problem.has_diagram():
             print(f"{pid}: skipped (has a diagram)", file=sys.stderr)
             continue
         if args.dry_run:
@@ -219,7 +219,7 @@ def main():
             rec = saved
             print(f"\n(using saved solution {out_path})", file=sys.stderr)
         else:
-            print(f"\nSolving {problem.get('knownAs')} ({pid})...", file=sys.stderr, flush=True)
+            print(f"\nSolving {problem.known_as} ({pid})...", file=sys.stderr, flush=True)
             rec = solve(problem, args.provider, args.model, api_key, args.reasoning_effort, answer_keys.get(pid))
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(rec, indent=2, ensure_ascii=False), encoding="utf-8")

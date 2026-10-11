@@ -20,18 +20,17 @@ import json
 import sys
 from pathlib import Path
 
-from classify_skills import (load_problems, match_skills, parse_run_label, reparse_saved,
-                             results_dir, split_model_spec)
+from classify_skills import match_skills, parse_run_label, reparse_saved, results_dir, split_model_spec
+from models import Problem, load_problems
 
 
-def problem_number(problem):
-    label = problem.get("label")
-    if label is not None:
-        return str(label)
-    known = problem.get("knownAs") or ""
+def problem_number(problem: Problem):
+    if problem.label is not None:
+        return str(problem.label)
+    known = problem.known_as or ""
     if "#" in known:
         return known.split("#", 1)[1].split()[0]
-    return problem["id"]
+    return problem.id
 
 
 def sort_key_for_problem(problem):
@@ -72,7 +71,7 @@ def export_rows(problems_by_id, problem_ids, run_path):
             missing.append(f"{problem_number(problem)} ({pid}): {err}")
             continue
         qnum = problem_number(problem)
-        stmt = problem["details"]["statement"].strip()
+        stmt = problem.statement
         rows.append([qnum, stmt, "", "", "", "", ""])
         n_questions += 1
         for s in result.get("skills") or []:
@@ -120,7 +119,7 @@ def main():
     if args.problem_ids:
         ids = list(args.problem_ids)
     else:
-        ids = [p["id"] for p in sorted(problems.values(), key=sort_key_for_problem)
+        ids = [p.id for p in sorted(problems.values(), key=sort_key_for_problem)
                if problem_number(p) not in exclude]
 
     ids = [pid for pid in ids if problem_number(problems[pid]) not in exclude]
