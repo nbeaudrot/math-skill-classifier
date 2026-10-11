@@ -46,7 +46,7 @@ import urllib.request
 from pathlib import Path
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "qwen/qwen3.8-27b"
+DEFAULT_MODEL = "anthropic/claude-haiku-5.5@high"
 # OpenRouter reserves credit for max_tokens up front; without a cap it uses the model's
 # maximum (65k+), which a low-balance key can't cover. This includes reasoning tokens.
 MAX_TOKENS = 16000
