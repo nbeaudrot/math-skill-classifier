@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 
 def _dumps(data: Any, *, indent: int | None = None, **kwargs) -> str:
@@ -54,6 +54,74 @@ class Skill:
 
     def to_json(self, *, indent: int | None = None, **kwargs) -> str:
         return _dumps(self.to_dict(), indent=indent, **kwargs)
+
+
+@dataclass(frozen=True)
+class LLMModel:
+    """OpenRouter (or compatible) model id and optional reasoning effort."""
+
+    name: str
+    reasoning_effort: str | None = None
+
+    REASONING_LEVELS: ClassVar[frozenset[str]] = frozenset({"low", "medium", "high", "xhigh"})
+
+    def run_label(self) -> str:
+        """Folder name segment, e.g. google/gemini-3.8-flash@medium."""
+        return f"{self.name}@{self.reasoning_effort}" if self.reasoning_effort else self.name
+
+    def __str__(self) -> str:
+        return self.run_label()
+
+    @classmethod
+    def parse(cls, model: str, reasoning_effort: str | None = None) -> LLMModel:
+        """Split ``model@high`` when effort is omitted; explicit effort overrides embedded suffix."""
+        if reasoning_effort is not None:
+            return cls(name=model, reasoning_effort=reasoning_effort)
+        if "@" in model:
+            base, _, suffix = model.rpartition("@")
+            if suffix in cls.REASONING_LEVELS:
+                return cls(name=base, reasoning_effort=suffix)
+        return cls(name=model)
+
+    @classmethod
+    def from_label(cls, label: str) -> LLMModel:
+        """Parse a run label produced by :meth:`run_label`."""
+        return cls.parse(label)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LLMModel:
+        return cls(
+            name=str(data["name"]),
+            reasoning_effort=data.get("reasoning_effort"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"name": self.name}
+        if self.reasoning_effort is not None:
+            out["reasoning_effort"] = self.reasoning_effort
+        return out
+
+    def to_json(self, *, indent: int | None = None, **kwargs) -> str:
+        return _dumps(self.to_dict(), indent=indent, **kwargs)
+
+    @classmethod
+    def from_saved_rec(cls, rec: dict[str, Any]) -> LLMModel:
+        """Build from a classify_skills.py or solve_problems.py saved JSON record."""
+        return cls(name=str(rec["model"]), reasoning_effort=rec.get("reasoningEffort"))
+
+    def matches_saved_rec(self, rec: dict[str, Any]) -> bool:
+        return rec.get("model") == self.name and rec.get("reasoningEffort") == self.reasoning_effort
+
+    def enrich_chat_body(self, body: dict[str, Any], *, provider: str) -> dict[str, Any]:
+        """Set ``model`` and provider-specific reasoning fields on an OpenAI-style chat body."""
+        out = {**body, "model": self.name}
+        if not self.reasoning_effort:
+            return out
+        if provider == "openrouter":
+            out["reasoning"] = {"effort": self.reasoning_effort}
+        else:
+            out["reasoning_effort"] = self.reasoning_effort
+        return out
 
 
 @dataclass

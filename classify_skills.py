@@ -51,7 +51,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from models import ClassificationResult, Problem, Skill, load_problems, match_skills
+from models import ClassificationResult, LLMModel, Problem, Skill, load_problems, match_skills
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-haiku-5.5@high"
@@ -211,55 +211,19 @@ def system_prompt(include_answer_key=False, include_images=False):
     return text
 
 
-def call_llm(model, messages, api_key, reasoning_effort=None, provider="openrouter"):
-    body = {
-        "model": model,
+def call_llm(llm: LLMModel, messages, api_key, provider="openrouter"):
+    body = llm.enrich_chat_body({
         "messages": messages,
         "temperature": 0.2,
         "max_tokens": MAX_TOKENS,
         "response_format": {"type": "json_object"},
-    }
-    if reasoning_effort:
-        # OpenRouter's own field; other OpenAI-compatible servers use OpenAI's top-level field.
-        if provider == "openrouter":
-            body["reasoning"] = {"effort": reasoning_effort}
-        else:
-            body["reasoning_effort"] = reasoning_effort
+    }, provider=provider)
     p = PROVIDERS[provider]
     return post_openrouter(body, api_key, timeout=p["timeout"], url=p["url"])
 
 
-REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
-
-
-def split_model_spec(model, reasoning_effort=None):
-    """OpenRouter model IDs may be written model@high in model lists; split into API id and effort."""
-    if reasoning_effort is not None:
-        return model, reasoning_effort
-    if "@" in model:
-        base, _, suffix = model.rpartition("@")
-        if suffix in REASONING_EFFORTS:
-            return base, suffix
-    return model, None
-
-
-def run_label(model, reasoning_effort=None):
-    """How a model + effort setting is named in folders and comparisons, e.g. google/gemini-3.8-flash@medium."""
-    return f"{model}@{reasoning_effort}" if reasoning_effort else model
-
-
-def parse_run_label(label):
-    """Undo run_label; only treats @suffix as effort when suffix is a known reasoning level."""
-    if "@" not in label:
-        return label, None
-    base, _, suffix = label.rpartition("@")
-    if suffix in REASONING_EFFORTS:
-        return base, suffix
-    return label, None
-
-
-def results_dir(out_dir, model, reasoning_effort=None, with_answer_key=False):
-    label = run_label(model, reasoning_effort)
+def results_dir(out_dir, llm: LLMModel, with_answer_key=False):
+    label = llm.run_label()
     if with_answer_key:
         label += ANSWER_KEY_RUN_SUFFIX
     return Path(out_dir) / re.sub(r"[^A-Za-z0-9.@-]+", "_", label)
@@ -325,10 +289,9 @@ def build_messages(problem: Problem, images_dir=None):
             {"role": "user", "content": user}]
 
 
-def classify(problem: Problem, model, api_key, reasoning_effort=None, provider="openrouter",
-             images_dir=None):
+def classify(problem: Problem, llm: LLMModel, api_key, provider="openrouter", images_dir=None):
     messages = build_messages(problem, images_dir)
-    resp = call_llm(model, messages, api_key, reasoning_effort, provider)
+    resp = call_llm(llm, messages, api_key, provider)
     choice = resp["choices"][0]
     reply = choice["message"].get("content") or ""
     try:
@@ -340,8 +303,8 @@ def classify(problem: Problem, model, api_key, reasoning_effort=None, provider="
     return {
         "problemId": problem.id,
         "knownAs": problem.known_as,
-        "model": model,
-        "reasoningEffort": reasoning_effort,
+        "model": llm.name,
+        "reasoningEffort": llm.reasoning_effort,
         "result": result,
         "rawReply": reply,
         "finishReason": choice.get("finish_reason"),
@@ -408,7 +371,7 @@ def main():
                     help="which API to call (default openrouter; mgb is a friend's self-hosted Qwen server)")
     ap.add_argument("--model", help="model ID (default: provider default); "
                     "may include @low|medium|high|xhigh for reasoning effort")
-    ap.add_argument("--reasoning-effort", choices=["low", "medium", "high", "xhigh"],
+    ap.add_argument("--reasoning-effort", choices=sorted(LLMModel.REASONING_LEVELS),
                     help="ask the model to think before answering (default: the model's own default)")
     ap.add_argument("--out-dir", default="output/skills", help="where to save results (default output/skills)")
     ap.add_argument("--combined", metavar="PATH",
@@ -428,9 +391,7 @@ def main():
         args = ap.parse_args()
     provider = PROVIDERS[args.provider]
     args.model = args.model or provider["default_model"]
-    args.model, parsed_effort = split_model_spec(args.model, args.reasoning_effort)
-    if parsed_effort is not None and args.reasoning_effort is None:
-        args.reasoning_effort = parsed_effort
+    llm = LLMModel.parse(args.model, args.reasoning_effort)
     # The Windows console defaults to cp1252, which can't print characters like the square root sign.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -445,7 +406,7 @@ def main():
         ap.error("give at least one PROBLEM_ID or use --sample")
     api_key = None if args.dry_run else provider["key_file"].read_text(encoding="utf-8").strip()
     answer_keys = load_answer_key(args.answer_key) if args.answer_key else None
-    out_dir = results_dir(args.out_dir, args.model, args.reasoning_effort, bool(answer_keys))
+    out_dir = results_dir(args.out_dir, llm, bool(answer_keys))
     combined = []
 
     for pid in ids:
@@ -482,7 +443,7 @@ def main():
         out_path = out_dir / f"{pid}.json"
         saved = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
         if (saved and saved.get("prompt") == messages
-                and saved.get("reasoningEffort") == args.reasoning_effort and not args.force
+                and llm.matches_saved_rec(saved) and not args.force
                 and reparse_saved(saved)["result"] is not None):
             rec = saved
             rec["result"] = match_skills(
@@ -490,8 +451,7 @@ def main():
             ).to_dict()
             print(f"\n(using saved result {out_path})", file=sys.stderr)
         else:
-            rec = classify(run_problem, args.model, api_key, args.reasoning_effort, args.provider,
-                           images_dir)
+            rec = classify(run_problem, llm, api_key, args.provider, images_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(rec, indent=2, ensure_ascii=False), encoding="utf-8")
         if rec["result"] is not None:

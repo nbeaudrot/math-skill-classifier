@@ -20,8 +20,8 @@ import json
 import sys
 from pathlib import Path
 
-from classify_skills import SKILLS_BY_NAME, parse_run_label, reparse_saved, results_dir, split_model_spec
-from models import ClassificationResult, Problem, Skill, load_problems, match_skills
+from classify_skills import SKILLS_BY_NAME, reparse_saved, results_dir
+from models import ClassificationResult, LLMModel, Problem, Skill, load_problems, match_skills
 
 
 def problem_number(problem: Problem):
@@ -113,8 +113,7 @@ def main():
     if args.run_dir:
         run_path = Path(args.run_dir)
     else:
-        model, effort = split_model_spec(args.model)
-        run_path = results_dir(args.results_dir, model, effort, args.answer_key)
+        run_path = results_dir(args.results_dir, LLMModel.parse(args.model), args.answer_key)
 
     if args.problem_ids:
         ids = list(args.problem_ids)

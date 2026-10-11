@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 
 from classify_skills import (ANSWER_KEY_RUN_SUFFIX, SKILLS_BY_NAME, build_messages, load_answer_key,
-                             parse_run_label, reparse_saved, results_dir)
-from models import ClassificationResult, load_problems, match_skills
+                             reparse_saved, results_dir)
+from models import ClassificationResult, LLMModel, load_problems, match_skills
 
 
 def parse_model_label(label):
@@ -30,7 +30,7 @@ def parse_model_label(label):
 
 def skills_for(problem, label, out_dir, answer_keys=None):
     base_label, with_key = parse_model_label(label)
-    path = results_dir(out_dir, *parse_run_label(base_label), with_key) / f"{problem.id}.json"
+    path = results_dir(out_dir, LLMModel.from_label(base_label), with_key) / f"{problem.id}.json"
     if not path.exists():
         return "no saved result"
     rec = json.loads(path.read_text(encoding="utf-8"))

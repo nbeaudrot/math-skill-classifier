@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 from classify_skills import MAX_TOKENS, PROVIDERS, manifest_argv, post_openrouter, results_dir
-from models import load_problems
+from models import LLMModel, load_problems
 
 DEFAULT_PROVIDER = "openrouter"
 DEFAULT_MODEL = "anthropic/claude-haiku-5.5"
@@ -120,14 +120,12 @@ def parse_answer(text):
     return m.group(1) if m else matches[-1].strip("*").strip()
 
 
-def solve(problem, provider, model, api_key, reasoning_effort=None):
+def solve(problem, provider, llm: LLMModel, api_key):
     messages = build_messages(problem)
-    body = {"model": model, "messages": messages, "temperature": 0.2, "max_tokens": MAX_TOKENS}
-    if reasoning_effort:
-        if provider == "openrouter":
-            body["reasoning"] = {"effort": reasoning_effort}
-        else:
-            body["reasoning_effort"] = reasoning_effort
+    body = llm.enrich_chat_body(
+        {"messages": messages, "temperature": 0.2, "max_tokens": MAX_TOKENS},
+        provider=provider,
+    )
     p = PROVIDERS[provider]
     resp = post_openrouter(body, api_key, timeout=p["timeout"], url=p["url"])
     choice = resp["choices"][0]
@@ -137,8 +135,8 @@ def solve(problem, provider, model, api_key, reasoning_effort=None):
         "knownAs": problem.known_as,
         "statement": problem.statement,
         "answerChoices": problem.prompt_answer_choices(),
-        "model": model,
-        "reasoningEffort": reasoning_effort,
+        "model": llm.name,
+        "reasoningEffort": llm.reasoning_effort,
         "answer": parse_answer(solution),
         "correctChoice": problem.answer_choice,
         "solution": solution,
@@ -196,7 +194,8 @@ def main():
     if not ids:
         ap.error("give at least one PROBLEM_ID or use --sample")
     api_key = None if args.dry_run else provider["key_file"].read_text(encoding="utf-8").strip()
-    out_dir = results_dir(args.out_dir, args.model, args.reasoning_effort)
+    llm = LLMModel.parse(args.model, args.reasoning_effort)
+    out_dir = results_dir(args.out_dir, llm)
     answer_keys = load_answer_keys(args.answer_key)
     combined = []
 
@@ -216,13 +215,13 @@ def main():
         out_path = out_dir / f"{pid}.json"
         saved = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
         if (saved and saved.get("prompt") == build_messages(run_problem)
-                and saved.get("reasoningEffort") == args.reasoning_effort and not args.force
+                and llm.matches_saved_rec(saved) and not args.force
                 and saved.get("solution")):
             rec = saved
             print(f"\n(using saved solution {out_path})", file=sys.stderr)
         else:
             print(f"\nSolving {problem.known_as} ({pid})...", file=sys.stderr, flush=True)
-            rec = solve(run_problem, args.provider, args.model, api_key, args.reasoning_effort)
+            rec = solve(run_problem, args.provider, llm, api_key)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(rec, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"\n=== {rec['knownAs']} ({pid}) ===\n{rec['solution']}")
