@@ -106,7 +106,7 @@
 "logic-and-geometry","Extremal reasoning","Finding a minimum or maximum by proving a bound and then constructing an example that reaches it.","","added",""
 "test-taking","Estimation","Approximating to find the answer or rule out choices without exact computation, including rounding.","10","csv",""
 "test-taking","Checking the ones digit","Working out only the ones digit of a large sum, product, or power and matching it to the one answer choice that ends in that digit, instead of doing the full calculation. (When the problem itself asks for the last digit, that's Units digit.)","","added",""
-"test-taking","Eliminating answer choices","Ruling out choices that are impossible, the wrong size, wrong units, or wrong parity, and guessing among the rest when there's no penalty.","","added+playbook","14a"
+"test-taking","Eliminating answer choices","Ruling out choices based on partial solutions. For example, if you can establish bounds on the answer, or learn that the answer must be a multiple of some integer, eliminate answers that violate those constraints","","added+playbook","14a"
 "test-taking","Back-solving from answer choices","Plugging each answer choice into the problem to see which works.","","added",""
 "test-taking","Plugging in convenient values","Substituting simple numbers for variables to test claims or general formulas.","","added",""
 "test-taking","Time management","Skipping problems that look long and coming back to them, and doing a quick direct computation instead of hunting for a clever shortcut.","","playbook","14b, 14e"
