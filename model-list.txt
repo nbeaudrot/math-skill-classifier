@@ -1,0 +1,4 @@
+anthropic/claude-haiku-5.5@high
+google/gemini-3.5-flash
+google/gemini-3.5-flash-lite@high
+qwen/qwen3.8-27b
