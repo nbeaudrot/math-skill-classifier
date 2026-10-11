@@ -16,20 +16,12 @@ import time
 import urllib.request
 from pathlib import Path
 
+from models import Problem
+
 
 def image_refs(problem):
     """Yield (filename_stem, url) for every image on a problem."""
-    d = problem.get("details", {})
-    img = d.get("image")
-    if img and img.get("url"):
-        yield "statement", img["url"]
-    for part in d.get("statementParts") or []:
-        if part.get("kind") == "image" and part.get("url"):
-            yield part.get("id") or "statement-part", part["url"]
-    for letter in sorted((d.get("optionImages") or {}).keys()):
-        opt = d["optionImages"][letter]
-        if opt.get("url"):
-            yield f"option-{letter}", opt["url"]
+    yield from Problem.from_record(problem).image_urls.items()
 
 
 def download_url(url, dest, retries=3):
