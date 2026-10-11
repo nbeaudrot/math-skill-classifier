@@ -16,9 +16,9 @@ import re
 import sys
 from pathlib import Path
 
-from classify_skills import (ANSWER_KEY_RUN_SUFFIX, build_messages, load_answer_key, match_skills,
+from classify_skills import (ANSWER_KEY_RUN_SUFFIX, SKILLS_BY_NAME, build_messages, load_answer_key,
                              parse_run_label, reparse_saved, results_dir)
-from models import load_problems
+from models import ClassificationResult, load_problems, match_skills
 
 
 def parse_model_label(label):
@@ -39,8 +39,8 @@ def skills_for(problem, label, out_dir, answer_keys=None):
         print(f"warning: {path} was made with a different prompt or skill list", file=sys.stderr)
     if reparse_saved(rec)["result"] is None:
         return "could not parse reply"
-    return [{"skill": s.get("skill"), "category": s.get("category"), "importance": s.get("importance")}
-            for s in match_skills(rec["result"])["skills"]]
+    matched = match_skills(ClassificationResult.from_dict(rec["result"]), SKILLS_BY_NAME)
+    return [{"skill": s.skill, "category": s.category, "importance": s.importance} for s in matched.skills]
 
 
 def dumps_with_one_line_arrays(records):

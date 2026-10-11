@@ -51,7 +51,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from models import Problem, Skill, load_problems, match_skills as _match_skills
+from models import ClassificationResult, Problem, Skill, load_problems, match_skills
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "anthropic/claude-haiku-5.5@high"
@@ -325,21 +325,6 @@ def build_messages(problem: Problem, images_dir=None):
             {"role": "user", "content": user}]
 
 
-def match_skills(result):
-    """Use the skill list's exact name and category, mark anything not on the list as unlisted,
-    set new: true when the model omitted it, and order skills essential first (keeping the
-    model's order within each group)."""
-    if result is None:
-        return None
-    matched = _match_skills(result, SKILLS_BY_NAME)
-    data = matched.to_dict()
-    if isinstance(result, dict):
-        result.clear()
-        result.update(data)
-        return result
-    return matched
-
-
 def classify(problem: Problem, model, api_key, reasoning_effort=None, provider="openrouter",
              images_dir=None):
     messages = build_messages(problem, images_dir)
@@ -347,7 +332,9 @@ def classify(problem: Problem, model, api_key, reasoning_effort=None, provider="
     choice = resp["choices"][0]
     reply = choice["message"].get("content") or ""
     try:
-        result = match_skills(parse_json_reply(reply))
+        result = match_skills(
+            ClassificationResult.from_dict(parse_json_reply(reply)), SKILLS_BY_NAME
+        ).to_dict()
     except (json.JSONDecodeError, AttributeError):
         result = None
     return {
@@ -498,7 +485,9 @@ def main():
                 and saved.get("reasoningEffort") == args.reasoning_effort and not args.force
                 and reparse_saved(saved)["result"] is not None):
             rec = saved
-            match_skills(rec["result"])
+            rec["result"] = match_skills(
+                ClassificationResult.from_dict(rec["result"]), SKILLS_BY_NAME
+            ).to_dict()
             print(f"\n(using saved result {out_path})", file=sys.stderr)
         else:
             rec = classify(run_problem, args.model, api_key, args.reasoning_effort, args.provider,

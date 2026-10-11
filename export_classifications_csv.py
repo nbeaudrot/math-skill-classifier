@@ -20,8 +20,8 @@ import json
 import sys
 from pathlib import Path
 
-from classify_skills import match_skills, parse_run_label, reparse_saved, results_dir, split_model_spec
-from models import Problem, load_problems
+from classify_skills import SKILLS_BY_NAME, parse_run_label, reparse_saved, results_dir, split_model_spec
+from models import ClassificationResult, Problem, Skill, load_problems, match_skills
 
 
 def problem_number(problem: Problem):
@@ -46,13 +46,13 @@ def load_classification(run_path, problem_id):
     rec = reparse_saved(rec)
     if rec.get("result") is None:
         return None, f"could not parse model reply in {path}"
-    return match_skills(rec["result"]), None
+    return match_skills(ClassificationResult.from_dict(rec["result"]), SKILLS_BY_NAME), None
 
 
-def skill_is_new(skill):
-    if skill.get("new"):
+def skill_is_new(skill: Skill) -> str:
+    if skill.new:
         return "yes"
-    if skill.get("listed") is False:
+    if skill.listed is False:
         return "yes"
     return "no"
 
@@ -74,15 +74,15 @@ def export_rows(problems_by_id, problem_ids, run_path):
         stmt = problem.statement
         rows.append([qnum, stmt, "", "", "", "", ""])
         n_questions += 1
-        for s in result.get("skills") or []:
+        for s in result.skills:
             rows.append([
                 "",
                 "",
-                s.get("category") or "",
-                s.get("skill") or "",
-                s.get("importance") or "",
+                s.category or "",
+                s.skill,
+                s.importance,
                 skill_is_new(s),
-                s.get("why") or "",
+                s.why,
             ])
     return rows, missing, n_questions
 

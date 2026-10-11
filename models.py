@@ -259,10 +259,8 @@ def load_problems(paths, answer_keys: dict[str, Any] | None = None) -> dict[str,
     return problems
 
 
-def match_skills(result: ClassificationResult | dict[str, Any], skills_by_name: dict) -> ClassificationResult:
+def match_skills(result: ClassificationResult, skills_by_name: dict) -> ClassificationResult:
     """Normalize skill names against the master list and sort by importance."""
-    if isinstance(result, dict):
-        result = ClassificationResult.from_dict(result)
     ordered = sorted(
         result.skills,
         key=lambda s: IMPORTANCE_ORDER.get(str(s.importance).lower(), 3),
