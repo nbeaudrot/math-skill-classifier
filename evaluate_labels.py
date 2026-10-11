@@ -23,7 +23,8 @@ import re
 import sys
 from pathlib import Path
 
-from classify_skills import SKILLS_BY_NAME, answer_choices, has_diagram, load_problems
+from classify_skills import (ANSWER_KEY_RUN_SUFFIX, SKILLS_BY_NAME, answer_choices, has_diagram,
+                             load_answer_key, load_problems)
 from compare_results import dumps_with_one_line_arrays, skills_for
 
 LABELS_FILE = Path(__file__).parent / "local-only" / "Contest Math Question Categorization - Sheet1.csv"
@@ -199,19 +200,25 @@ def pick(labels, problems, n, seed):
     return random.Random(seed).sample(pool, min(n, len(pool))), len(pool)
 
 
-def score(ids, labels, problems, model, results_dir):
+def score(ids, labels, problems, model, results_dir, answer_keys=None, treat_yours_as_essential=False):
     stats = collections.Counter()
     for pid in ids:
-        found = skills_for(problems[pid], model, results_dir)
+        found = skills_for(problems[pid], model, results_dir, answer_keys)
         if isinstance(found, str):
             stats["missing"] += 1
             continue
         yours = {s for skills, _ in labels[pid] for s in skills}
         names = {s["skill"] for s in found}
+        if treat_yours_as_essential:
+            model_essential = names
+        else:
+            model_essential = {s["skill"] for s in found if s["importance"] == "essential"}
         stats["skills"] += len(found)
-        stats["essential"] += sum(s["importance"] == "essential" for s in found)
+        stats["essential"] += len(model_essential)
         stats["time_saving"] += sum(s["importance"] == "time-saving" for s in found)
-        stats["essential_not_yours"] += sum(s["importance"] == "essential" and s["skill"] not in yours for s in found)
+        stats["essential_not_yours"] += sum(s not in yours for s in model_essential)
+        stats["your_skills"] += len(yours)
+        stats["your_skills_hit"] += len(yours & names)
         for skills, _ in labels[pid]:
             if skills:
                 stats["your_tags"] += 1
@@ -230,6 +237,12 @@ def main():
     ap.add_argument("--models", nargs="+", help="model IDs, optionally with a reasoning effort (model@medium)")
     ap.add_argument("--input", nargs="+", help="problem JSON file(s) (default: output/*.json)")
     ap.add_argument("--results-dir", default="output/skills")
+    ap.add_argument("--answer-key", metavar="PATH",
+                    help="answer key JSON; required for model labels ending in -with-key")
+    ap.add_argument("--also-answer-key-runs", action="store_true",
+                    help=f"also score each model's {ANSWER_KEY_RUN_SUFFIX} results (same --models names)")
+    ap.add_argument("--treat-yours-as-essential", action="store_true",
+                    help="compare against all of your tagged skills as essential (ignore LLM importance)")
     ap.add_argument("--out", help="also write a side-by-side JSON with your labels and each model's skills")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -251,20 +264,26 @@ def main():
     if not args.models:
         ap.error("give --models or --print-ids")
 
+    answer_keys = load_answer_key(args.answer_key) if args.answer_key else None
+    if args.also_answer_key_runs and not answer_keys:
+        ap.error("--also-answer-key-runs requires --answer-key")
+
+    model_labels = list(args.models)
+    if args.also_answer_key_runs:
+        model_labels += [m + ANSWER_KEY_RUN_SUFFIX for m in args.models]
+
     untranslated = collections.Counter(label for pid in ids for skills, label in labels[pid] if not skills)
     if untranslated:
         print(f"Your tags with no matching skill (can't be matched): {dict(untranslated)}\n")
 
-    print(f"{'model':40} {'skills':>6} {'essential':>10} {'% essential':>12} {'% time-saving':>14} "
-          f"{'essential not yours':>20} {'your tags found':>16}")
-    for model in args.models:
-        s = score(ids, labels, problems, model, args.results_dir)
-        pct = 100 * s["essential"] / s["skills"] if s["skills"] else 0
-        pct_ts = 100 * s["time_saving"] / s["skills"] if s["skills"] else 0
-        found = f"{s['your_tags_found']}/{s['your_tags']}"
+    print(f"{'model':48} {'skills':>6} {'your skills hit':>16} {'tag rows hit':>14}")
+    for model in model_labels:
+        s = score(ids, labels, problems, model, args.results_dir, answer_keys,
+                  args.treat_yours_as_essential)
+        listed = f"{s['your_skills_hit']}/{s['your_skills']}"
+        tags = f"{s['your_tags_found']}/{s['your_tags']}"
         note = f"  ({s['missing']} problems without results)" if s["missing"] else ""
-        print(f"{model:40} {s['skills']:>6} {s['essential']:>10} {pct:>11.0f}% {pct_ts:>13.0f}% "
-              f"{s['essential_not_yours']:>20} {found:>16}{note}")
+        print(f"{model:48} {s['skills']:>6} {listed:>16} {tags:>14}{note}")
 
     if args.out:
         records = []
@@ -276,7 +295,8 @@ def main():
                 "knownAs": p.get("knownAs"),
                 "statement": p["details"]["statement"],
                 "answerChoices": answer_choices(p),
-                "models": {"your labels": yours, **{m: skills_for(p, m, args.results_dir) for m in args.models}},
+                "models": {"your labels": yours,
+                           **{m: skills_for(p, m, args.results_dir, answer_keys) for m in model_labels}},
             })
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)

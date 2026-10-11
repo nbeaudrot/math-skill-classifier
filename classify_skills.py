@@ -29,6 +29,9 @@ Examples:
 
     # Show the prompt without calling the API
     python classify_skills.py X4hTWCLinR4Gs8QLicVw --dry-run
+
+    # Include the official answer to consider alternate solution paths
+    python classify_skills.py @sample-problem-lists/amc8-2022-no-diagram.txt --input output/amc8-2022.json --answer-key
 """
 
 import argparse
@@ -49,6 +52,8 @@ DEFAULT_MODEL = "qwen/qwen3.8-27b"
 MAX_TOKENS = 16000
 KEY_FILE = Path(__file__).parent / "local-only" / "openrouter_api_key.txt"
 SKILLS_FILE = Path(__file__).parent / "skill-lists" / "skills-merged.csv"
+DEFAULT_ANSWER_KEY = Path(__file__).parent / "local-only" / "aops-answer-keys" / "2022_amc_8_answer_key.json"
+ANSWER_KEY_RUN_SUFFIX = "-with-key"
 
 # OpenAI-compatible endpoints. A single self-hosted GPU is much slower than OpenRouter, hence the longer timeout.
 PROVIDERS = {
@@ -138,6 +143,17 @@ Respond with JSON only, in this format:
 }}
 For a new skill not on the list, also include "new": true and "category"."""
 
+ANSWER_KEY_GUIDANCE = """\
+Additional guidelines (the correct answer is given below):
+- Use the known answer to sanity-check which skills fit a complete solution, but do not \
+reverse-engineer a full solution in the response.
+- Consider alternate reasonable solution paths, including clever formulas or problem-solving \
+strategies common on math team and competition curricula (e.g. telescoping, complementary \
+counting, Simon's Favorite Factoring Trick, divisibility shortcuts), and tag skills for any \
+path that a strong student might actually use.
+- If the answer makes a shortcut or test-taking approach clearly viable, include those skills \
+when appropriate."""
+
 
 def load_problems(paths):
     problems = {}
@@ -161,7 +177,19 @@ def answer_choices(problem):
     return {k: f"${opts[k]}$" for k in sorted(opts)}
 
 
-def build_user_prompt(problem):
+def load_answer_key(path):
+    """Map problem ID -> {correctChoice, answerText, ...} from an AoPS-style answer key JSON file."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return data.get("problems") or {}
+
+
+def answer_key_entry(answer_keys, problem):
+    if not answer_keys:
+        return None
+    return answer_keys.get(problem["id"])
+
+
+def build_user_prompt(problem, answer_entry=None):
     lines = [f"Source: {problem.get('knownAs') or problem['examTitle']}"]
     if problem.get("examType"):
         lines.append(f"Competition level: {problem['examType']}")
@@ -170,7 +198,19 @@ def build_user_prompt(problem):
     if choices:
         lines += ["", "Answer choices:"]
         lines += [f"({k}) {v}" for k, v in choices.items()]
+    if answer_entry:
+        lines += ["", "Known correct answer (from the official answer key):"]
+        if answer_entry.get("correctChoice"):
+            lines.append(f"Choice: ({answer_entry['correctChoice']})")
+        if answer_entry.get("answerText"):
+            lines.append(f"Answer: {answer_entry['answerText']}")
     return "\n".join(lines)
+
+
+def system_prompt(include_answer_key=False):
+    if not include_answer_key:
+        return LLM_PROMPT
+    return LLM_PROMPT + "\n\n" + ANSWER_KEY_GUIDANCE
 
 
 def call_llm(model, messages, api_key, reasoning_effort=None, provider="openrouter"):
@@ -191,18 +231,40 @@ def call_llm(model, messages, api_key, reasoning_effort=None, provider="openrout
     return post_openrouter(body, api_key, timeout=p["timeout"], url=p["url"])
 
 
+REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+
+
+def split_model_spec(model, reasoning_effort=None):
+    """OpenRouter model IDs may be written model@high in model lists; split into API id and effort."""
+    if reasoning_effort is not None:
+        return model, reasoning_effort
+    if "@" in model:
+        base, _, suffix = model.rpartition("@")
+        if suffix in REASONING_EFFORTS:
+            return base, suffix
+    return model, None
+
+
 def run_label(model, reasoning_effort=None):
     """How a model + effort setting is named in folders and comparisons, e.g. google/gemini-3.8-flash@medium."""
     return f"{model}@{reasoning_effort}" if reasoning_effort else model
 
 
 def parse_run_label(label):
-    model, _, effort = label.partition("@")
-    return model, effort or None
+    """Undo run_label; only treats @suffix as effort when suffix is a known reasoning level."""
+    if "@" not in label:
+        return label, None
+    base, _, suffix = label.rpartition("@")
+    if suffix in REASONING_EFFORTS:
+        return base, suffix
+    return label, None
 
 
-def results_dir(out_dir, model, reasoning_effort=None):
-    return Path(out_dir) / re.sub(r"[^A-Za-z0-9.@-]+", "_", run_label(model, reasoning_effort))
+def results_dir(out_dir, model, reasoning_effort=None, with_answer_key=False):
+    label = run_label(model, reasoning_effort)
+    if with_answer_key:
+        label += ANSWER_KEY_RUN_SUFFIX
+    return Path(out_dir) / re.sub(r"[^A-Za-z0-9.@-]+", "_", label)
 
 
 def post_openrouter(body, api_key, retries=3, timeout=180, url=API_URL):
@@ -244,9 +306,10 @@ def reparse_saved(rec):
     return rec
 
 
-def build_messages(problem):
-    return [{"role": "system", "content": LLM_PROMPT},
-            {"role": "user", "content": build_user_prompt(problem)}]
+def build_messages(problem, answer_entry=None):
+    include_key = answer_entry is not None
+    return [{"role": "system", "content": system_prompt(include_key)},
+            {"role": "user", "content": build_user_prompt(problem, answer_entry)}]
 
 
 IMPORTANCE_ORDER = {"essential": 0, "time-saving": 1, "helpful": 2}
@@ -267,8 +330,8 @@ def match_skills(result):
     return result
 
 
-def classify(problem, model, api_key, reasoning_effort=None, provider="openrouter"):
-    messages = build_messages(problem)
+def classify(problem, model, api_key, reasoning_effort=None, provider="openrouter", answer_entry=None):
+    messages = build_messages(problem, answer_entry)
     resp = call_llm(model, messages, api_key, reasoning_effort, provider)
     choice = resp["choices"][0]
     reply = choice["message"].get("content") or ""
@@ -338,7 +401,8 @@ def main():
     ap.add_argument("--input", nargs="+", help="problem JSON file(s) (default: output/*.json)")
     ap.add_argument("--provider", choices=sorted(PROVIDERS), default="openrouter",
                     help="which API to call (default openrouter; mgb is a friend's self-hosted Qwen server)")
-    ap.add_argument("--model", help=f"model ID (default: the provider's default, {DEFAULT_MODEL} for openrouter)")
+    ap.add_argument("--model", help="model ID (default: provider default); "
+                    "may include @low|medium|high|xhigh for reasoning effort")
     ap.add_argument("--reasoning-effort", choices=["low", "medium", "high", "xhigh"],
                     help="ask the model to think before answering (default: the model's own default)")
     ap.add_argument("--out-dir", default="output/skills", help="where to save results (default output/skills)")
@@ -347,6 +411,9 @@ def main():
     ap.add_argument("--force", action="store_true",
                     help="call the API even if a saved result with the same prompt exists")
     ap.add_argument("--dry-run", action="store_true", help="print the prompt without calling the API")
+    ap.add_argument("--answer-key", metavar="PATH", nargs="?", const=str(DEFAULT_ANSWER_KEY),
+                    help="include the official answer (choice and value) in the prompt; "
+                         f"default file: {DEFAULT_ANSWER_KEY.name}")
     ap.add_argument("--manifest", metavar="PATH",
                     help="JSON file of options to use; options given on the command line take precedence")
     args = ap.parse_args()
@@ -356,6 +423,9 @@ def main():
         args = ap.parse_args()
     provider = PROVIDERS[args.provider]
     args.model = args.model or provider["default_model"]
+    args.model, parsed_effort = split_model_spec(args.model, args.reasoning_effort)
+    if parsed_effort is not None and args.reasoning_effort is None:
+        args.reasoning_effort = parsed_effort
     # The Windows console defaults to cp1252, which can't print characters like the square root sign.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -367,7 +437,8 @@ def main():
     if not ids:
         ap.error("give at least one PROBLEM_ID or use --sample")
     api_key = None if args.dry_run else provider["key_file"].read_text(encoding="utf-8").strip()
-    out_dir = results_dir(args.out_dir, args.model, args.reasoning_effort)
+    answer_keys = load_answer_key(args.answer_key) if args.answer_key else None
+    out_dir = results_dir(args.out_dir, args.model, args.reasoning_effort, bool(answer_keys))
     combined = []
 
     for pid in ids:
@@ -378,19 +449,23 @@ def main():
         if has_diagram(problem):
             print(f"{pid}: skipped (has a diagram)", file=sys.stderr)
             continue
+        key_entry = answer_key_entry(answer_keys, problem) if answer_keys else None
+        if answer_keys and key_entry is None:
+            print(f"{pid}: warning: no answer key entry", file=sys.stderr)
+        messages = build_messages(problem, key_entry)
         if args.dry_run:
-            print(f"\n=== {pid} ===\n--- system ---\n{LLM_PROMPT}\n--- user ---\n{build_user_prompt(problem)}")
+            print(f"\n=== {pid} ===\n--- system ---\n{messages[0]['content']}\n--- user ---\n{messages[1]['content']}")
             continue
         out_path = out_dir / f"{pid}.json"
         saved = json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
-        if (saved and saved.get("prompt") == build_messages(problem)
+        if (saved and saved.get("prompt") == messages
                 and saved.get("reasoningEffort") == args.reasoning_effort and not args.force
                 and reparse_saved(saved)["result"] is not None):
             rec = saved
             match_skills(rec["result"])
             print(f"\n(using saved result {out_path})", file=sys.stderr)
         else:
-            rec = classify(problem, args.model, api_key, args.reasoning_effort, args.provider)
+            rec = classify(problem, args.model, api_key, args.reasoning_effort, args.provider, key_entry)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(rec, indent=2, ensure_ascii=False), encoding="utf-8")
         print_result(rec)
